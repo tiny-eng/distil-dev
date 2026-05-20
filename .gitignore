@@ -14,6 +14,7 @@ venv/
 *.log
 wallets/
 dataset/
+results/
 
 # Secrets
 .env

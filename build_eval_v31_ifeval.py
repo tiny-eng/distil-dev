@@ -23,12 +23,12 @@ Expected local files:
 
 Run example:
 
-python -m distil-dev.eval_v31_ifeval \
+python -m distil-dev.build_eval_v31_ifeval \
     --base-url http://38.102.125.144:8001/v1 \
-    --model qwen3-4b \
-    --block-seed 112 \
-    --n-items 200 \
-    --out distil-dev/results/qwen3_4b_ifeval_results_raw2048.json
+    --model qwen3-8b \
+    --block-seed 201 \
+    --n-items 100 \
+    --out distil-dev/results/qwen3_8b_ifeval_results.json
 """
 
 from __future__ import annotations
@@ -49,12 +49,15 @@ import distil.pod.axes.v31._ifeval_vendor as _ifeval_vendor
 
 logger = logging.getLogger("ifeval")
 
-MAX_TOKENS = 2048
+MAX_TOKENS = 1024
 AXIS_NAME = "v31_ifeval_verifiable"
 
 DEFAULT_BASE_URL = "http://38.102.125.144:8888/v1"
 DEFAULT_MODEL = "qwen3-4b"
 DEFAULT_TIMEOUT = 180.0
+
+CHUTE_URL = "https://llm.chutes.ai/v1/"
+CHUTE_MODEL = "qwen3-32b"
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 _THINK_TRAIL_RE = re.compile(r"^.*?</think>\s*", re.DOTALL)
@@ -94,7 +97,7 @@ class BenchResult:
             "items": self.items,
         }
     
-def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def _post_json(url: str, payload: dict[str, Any], timeout: float, api_key: str = "EMPTY") -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
@@ -103,7 +106,7 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, A
         headers={
             "Content-Type": "application/json",
             # vLLM usually ignores auth unless launched with auth enabled.
-            "Authorization": "Bearer EMPTY",
+            "Authorization": f"Bearer {api_key}",
         },
         method="POST",
     )
@@ -229,6 +232,50 @@ def generate_one_vllm_completion(
 
     return text or "", completion_tokens
 
+def generate_one_chutes_completion(
+        *,
+        api_key: str,
+        base_url: str = "https://llm.chutes.ai/v1",
+        model: str,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        timeout: float,
+)  -> tuple[str, int]:
+    endpoint = base_url.rstrip("/") + "/completions"
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": 1.0,
+    }
+
+    data = _post_json(
+        endpoint,
+        payload,
+        timeout=timeout,
+        api_key=api_key,
+    )
+
+    choices = data.get("choices") or []
+
+    if not choices:
+        raise RuntimeError(f"No choices returned by Chutes: {data}")
+
+    choice = choices[0]
+
+    text = choice.get("text", "")
+
+    usage = data.get("usage") or {}
+    completion_tokens = usage.get("completion_tokens", 0)
+
+    if not isinstance(completion_tokens, int):
+        completion_tokens = 0
+
+    return text or "", completion_tokens
+
 
 
 def generate_greedy_vllm_server(
@@ -255,6 +302,46 @@ def generate_greedy_vllm_server(
         # text, n_tokens = generate_one_vllm_chat(
         text, n_tokens = generate_one_vllm_completion(    
             base_url=base_url,
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+        )
+
+        outs.append((text, n_tokens))
+
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+
+    return outs
+
+def generate_greedy_chutes_server(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompts: list[str],
+    max_tokens: int,
+    temperature: float = 0.0,
+    timeout: float = DEFAULT_TIMEOUT,
+    sleep_s: float = 0.0,
+) -> list[tuple[str, int]]:
+    """
+    Generate responses sequentially from an already-running vLLM server.
+
+    This mirrors the original generate_greedy(...) behavior conceptually,
+    but uses HTTP instead of engine.generate(...).
+    """
+    outs: list[tuple[str, int]] = []
+
+    for i, prompt in enumerate(prompts, start=1):
+        logger.info("Generating item %d/%d", i, len(prompts))
+
+        # text, n_tokens = generate_one_vllm_chat(
+        text, n_tokens = generate_one_chutes_completion(    
+            base_url=base_url,
+            api_key=api_key,
             model=model,
             prompt=prompt,
             max_tokens=max_tokens,
