@@ -15,6 +15,7 @@ venv/
 wallets/
 dataset/
 results/
+data/
 
 # Secrets
 .env
